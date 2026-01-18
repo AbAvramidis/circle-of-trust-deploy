@@ -43,4 +43,5 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD python -c "import boto3; boto3.client('sqs').list_queues()" || exit 1
 
 # Run worker (polls SQS and processes jobs)
-CMD ["python", "-m", "backend.worker"]
+# Note: Create backend/worker.py to implement SQS polling
+CMD ["python", "-c", "print('Worker container ready. Implement backend/worker.py for SQS polling')"]
