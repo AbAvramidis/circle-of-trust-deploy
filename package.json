@@ -1,0 +1,13 @@
+{
+  "name": "llm-council",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "concurrently -n \"BACKEND,FRONTEND\" -c \"blue,green\" \"npm:backend\" \"npm:frontend\"",
+    "backend": "uv run python -m backend.main",
+    "frontend": "cd frontend && npm run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

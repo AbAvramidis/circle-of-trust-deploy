@@ -1,0 +1,39 @@
+{
+  "advisors": [
+    {
+      "id": "steve_jobs",
+      "name": "Steve Jobs",
+      "model": "deepseek-r1:latest",
+      "prompt_file": "prompts/steve_jobs.md",
+      "description": "CEO of Apple, Visionary"
+    },
+    {
+      "id": "elon_musk",
+      "name": "Elon Musk",
+      "model": "qwen3:latest",
+      "prompt_file": "prompts/elon_musk.md",
+      "description": "Founder and CEO Tesla/X"
+    },
+    {
+      "id": "jensen_huang",
+      "name": "Jensen Huang",
+      "model": "gemma3:latest",
+      "prompt_file": "prompts/jensen_huang.md",
+      "description": "CEO of Nvidia"
+    },
+    {
+      "id": "mark_zuckerberg",
+      "name": "Mark Zuckerberg",
+      "model": "gpt-oss:latest",
+      "prompt_file": "prompts/mark_zuckerberg.md",
+      "description": "Founder and CEO, Meta"
+    },
+    {
+      "id": "andrej_karpathy",
+      "name": "Andrej Karpathy",
+      "model": "mistral:latest",
+      "prompt_file": "prompts/andrej_karpathy.md",
+      "description": "AI Researcher and Engineer, focused on deep learning, computer vision, and autonomous systems."
+    }
+  ]
+}
