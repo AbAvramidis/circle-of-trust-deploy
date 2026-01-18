@@ -1,0 +1,94 @@
+name: Update ECS Services
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to update (api, worker, or all)'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - api
+          - worker
+  workflow_call:
+    inputs:
+      service:
+        description: 'Service to update'
+        required: true
+        type: string
+
+env:
+  AWS_REGION: us-east-1
+  ECS_API_CLUSTER: circle-of-trust-api
+  ECS_API_SERVICE: api-service
+  ECS_WORKER_CLUSTER: circle-of-trust-workers
+  ECS_WORKER_SERVICE: worker-service
+
+jobs:
+  update-api:
+    name: Update API Service
+    runs-on: ubuntu-latest
+    if: inputs.service == 'api' || inputs.service == 'all'
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Force new deployment
+        run: |
+          echo "🔄 Triggering new deployment for API service..."
+          aws ecs update-service \
+            --cluster ${{ env.ECS_API_CLUSTER }} \
+            --service ${{ env.ECS_API_SERVICE }} \
+            --force-new-deployment \
+            --no-cli-pager
+      
+      - name: Wait for deployment
+        run: |
+          echo "⏳ Waiting for service stability..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_API_CLUSTER }} \
+            --services ${{ env.ECS_API_SERVICE }}
+          echo "✅ API service updated successfully"
+
+  update-worker:
+    name: Update Worker Service
+    runs-on: ubuntu-latest
+    if: inputs.service == 'worker' || inputs.service == 'all'
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Force new deployment
+        run: |
+          echo "🔄 Triggering new deployment for Worker service..."
+          aws ecs update-service \
+            --cluster ${{ env.ECS_WORKER_CLUSTER }} \
+            --service ${{ env.ECS_WORKER_SERVICE }} \
+            --force-new-deployment \
+            --no-cli-pager
+      
+      - name: Wait for deployment
+        run: |
+          echo "⏳ Waiting for service stability..."
+          aws ecs wait services-stable \
+            --cluster ${{ env.ECS_WORKER_CLUSTER }} \
+            --services ${{ env.ECS_WORKER_SERVICE }}
+          echo "✅ Worker service updated successfully"

@@ -1,0 +1,46 @@
+# Multi-stage build for Worker service
+FROM python:3.11-slim as builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install dependencies
+COPY backend/requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+# Production stage
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Copy Python dependencies from builder
+COPY --from=builder /root/.local /root/.local
+
+# Copy application code
+COPY backend/ .
+
+# Create non-root user
+RUN useradd -m -u 1000 appuser && \
+    chown -R appuser:appuser /app
+
+USER appuser
+
+# Add local bin to PATH
+ENV PATH=/root/.local/bin:$PATH
+
+# Environment variables for worker
+ENV WORKER_TYPE=sqs_consumer
+ENV SQS_QUEUE_URL=""
+ENV AWS_REGION=us-east-1
+ENV MAX_WORKERS=4
+
+# Health check - worker is healthy if it can connect to SQS
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import boto3; boto3.client('sqs').list_queues()" || exit 1
+
+# Run worker (polls SQS and processes jobs)
+CMD ["python", "-m", "backend.worker"]

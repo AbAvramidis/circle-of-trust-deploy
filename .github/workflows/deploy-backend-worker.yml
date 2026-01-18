@@ -1,0 +1,98 @@
+name: Deploy Backend Worker to ECS
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - '!backend/tests/**'
+      - 'Dockerfile.worker'
+      - '.github/workflows/deploy-backend-worker.yml'
+  workflow_dispatch:
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: circle-of-trust-worker
+  ECS_CLUSTER: circle-of-trust-workers
+  ECS_SERVICE: worker-service
+  CONTAINER_NAME: worker
+
+jobs:
+  deploy:
+    name: Build and Deploy Worker
+    runs-on: ubuntu-latest
+    
+    permissions:
+      id-token: write
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+      
+      - name: Set image tag
+        id: image
+        run: |
+          echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker image
+        run: |
+          docker build \
+            -f Dockerfile.worker \
+            -t ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }} \
+            -t ${{ steps.image.outputs.repo }}:latest \
+            .
+      
+      - name: Run security scan (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }}
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+      
+      - name: Push image to ECR
+        run: |
+          docker push ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }}
+          docker push ${{ steps.image.outputs.repo }}:latest
+      
+      - name: Deployment summary
+        run: |
+          echo "✅ Worker image pushed to ECR" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "To deploy this image, run the 'Update ECS Services' workflow" >> $GITHUB_STEP_SUMMARY
+      
+      - name: Trigger ECS update
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'update-ecs.yml',
+              ref: 'main',
+              inputs: {
+                service: 'worker'
+              }
+            })
+            console.log('✅ Triggered ECS Worker service update')
+      
+      - name: Verify deployment
+        run: |
+          echo "✅ Worker image built and pushed"
+          echo "🐳 Image: ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }}"
+          echo "🏷️  Tags: ${{ steps.image.outputs.tag }}, latest"
