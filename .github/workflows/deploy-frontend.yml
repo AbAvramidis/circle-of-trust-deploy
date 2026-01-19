@@ -1,71 +1,124 @@
+# ============================================================================
+# Frontend Deployment Workflow
+# ============================================================================
+# Purpose: Build React frontend and deploy to S3 static website hosting
+# Deploys: Vite-built React app to S3 bucket with optimized caching
+# ============================================================================
+
 name: Deploy Frontend to S3
 
+# ============================================================================
+# WORKFLOW TRIGGERS
+# ============================================================================
 on:
+  # Trigger when frontend code changes are pushed to main
   push:
     branches: [main]
     paths:
-      - 'frontend/**'
-      - '.github/workflows/deploy-frontend.yml'
+      - 'frontend/**'                            # Any frontend file changes
+      - '.github/workflows/deploy-frontend.yml'  # Workflow file changes
+  
+  # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
 
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
 env:
-  AWS_REGION: us-east-1
-  S3_BUCKET: circle-of-trust-frontend
-  DISTRIBUTION_FOLDER: frontend/dist
+  AWS_REGION: us-east-1                    # AWS region where S3 bucket is located
+  S3_BUCKET: circle-of-trust-frontend      # Target S3 bucket name
+  DISTRIBUTION_FOLDER: frontend/dist       # Vite build output directory
 
+# ============================================================================
+# JOBS
+# ============================================================================
 jobs:
   deploy:
     name: Build and Deploy to S3
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Run on GitHub-hosted Ubuntu runner
     
+    # =========================================================================
+    # PERMISSIONS: Required for OIDC authentication with AWS
+    # =========================================================================
     permissions:
-      id-token: write
-      contents: read
+      id-token: write   # Required to get OIDC token for AWS authentication
+      contents: read    # Required to checkout repository code
     
+    # =========================================================================
+    # DEPLOYMENT STEPS
+    # =========================================================================
     steps:
+      # -----------------------------------------------------------------------
+      # STEP 1: Checkout repository code
+      # -----------------------------------------------------------------------
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4  # Clone repository to runner
       
+      # -----------------------------------------------------------------------
+      # STEP 2: Setup Node.js environment
+      # -----------------------------------------------------------------------
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: frontend/package-lock.json
+          node-version: '20'  # Use Node.js 20 LTS
+          cache: 'npm'        # Cache npm packages to speed up builds
+          cache-dependency-path: frontend/package-lock.json  # Cache key file
       
+      # -----------------------------------------------------------------------
+      # STEP 3: Install frontend dependencies
+      # -----------------------------------------------------------------------
       - name: Install dependencies
         working-directory: frontend
-        run: npm ci
+        run: npm ci  # Clean install from package-lock.json (faster & more reliable than npm install)
       
+      # -----------------------------------------------------------------------
+      # STEP 4: Build production-ready frontend
+      # -----------------------------------------------------------------------
       - name: Build frontend
         working-directory: frontend
-        run: npm run build
+        run: npm run build  # Runs Vite build process (defined in package.json)
         env:
-          VITE_API_URL: ${{ secrets.VITE_API_URL }}
-          VITE_WS_URL: ${{ secrets.VITE_WS_URL }}
+          # Inject API URLs at build time (used by Vite for environment variables)
+          VITE_API_URL: ${{ secrets.VITE_API_URL }}  # Backend API Gateway endpoint
+          VITE_WS_URL: ${{ secrets.VITE_WS_URL }}    # WebSocket API Gateway endpoint
+        # Output: Creates optimized bundle in frontend/dist/
+        # - Minified JS/CSS
+        # - Asset hashing for cache busting
+        # - Source maps (if configured)
       
+      # -----------------------------------------------------------------------
+      # STEP 5: Authenticate with AWS using OIDC (no long-lived credentials!)
+      # -----------------------------------------------------------------------
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          # Use OIDC to assume IAM role (more secure than access keys)
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
+        # This provides temporary AWS credentials that expire after the workflow
     
-      
+      # -----------------------------------------------------------------------
+      # STEP 6: Deploy to S3 bucket
+      # -----------------------------------------------------------------------
       - name: Deploy to S3
         working-directory: frontend
         run: |
+          # Sync all files EXCEPT index.html to S3 with aggressive caching
           aws s3 sync dist/ s3://${{ env.S3_BUCKET }}/ \
-            --delete \
-            --cache-control "public, max-age=31536000, immutable" \
-            --exclude "index.html" \
-            --exclude "*.map"
+            --delete \                                      # Remove files not in dist/
+            --cache-control "public, max-age=31536000, immutable" \ # Cache for 1 year (assets have hashed names)
+            --exclude "index.html" \                        # Skip index.html (handled separately)
+            --exclude "*.map"                               # Skip source maps (don't upload to production)
           
-          # index.html should not be cached
+          # Upload index.html separately with NO caching
+          # (ensures users always get latest version)
           aws s3 cp dist/index.html s3://${{ env.S3_BUCKET }}/index.html \
-            --cache-control "public, max-age=0, must-revalidate" \
-            --content-type "text/html"
+            --cache-control "public, max-age=0, must-revalidate" \ # Always revalidate with server
+            --content-type "text/html"                              # Explicit content type
 
-      
+      # -----------------------------------------------------------------------
+      # STEP 7: Display deployment summary
+      # -----------------------------------------------------------------------
       - name: Deployment summary
         run: |
           echo "✅ Frontend deployed to S3"

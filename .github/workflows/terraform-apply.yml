@@ -1,91 +1,171 @@
+# ============================================================================
+# Terraform Infrastructure Deployment Workflow
+# ============================================================================
+# Purpose: Manages AWS infrastructure using Terraform (IaC)
+# Deploys: VPC, ECS clusters, ECR, S3, DynamoDB, SQS, IAM roles, etc.
+# ============================================================================
+
 name: Terraform Apply
 
+# ============================================================================
+# WORKFLOW TRIGGERS
+# ============================================================================
 on:
+  # Trigger on push to main branch when infrastructure code changes
   push:
     branches: [main]
     paths:
-      - 'infra/**'
-      - '.github/workflows/terraform-apply.yml'
+      - 'infra/**'                              # Any Terraform file changes
+      - '.github/workflows/terraform-apply.yml' # Workflow file changes
+  
+  # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
 
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
 env:
-  AWS_REGION: us-east-1
-  TF_VERSION: 1.6
+  AWS_REGION: us-east-1  # Primary AWS region for deployment
+  TF_VERSION: 1.6        # Terraform version to use
 
+# ============================================================================
+# JOBS
+# ============================================================================
 jobs:
   terraform:
     name: Terraform Plan and Apply
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Run on GitHub-hosted Ubuntu runner
     
+    # =========================================================================
+    # PERMISSIONS: Required for OIDC authentication with AWS
+    # =========================================================================
     permissions:
-      id-token: write
-      contents: read
-      pull-requests: write
+      id-token: write       # Required to get OIDC token for AWS authentication
+      contents: read        # Required to checkout repository code
+      pull-requests: write  # Required to comment on PRs with plan output
     
+    # Set working directory for all run commands
     defaults:
       run:
         working-directory: infra
     
+    # =========================================================================
+    # DEPLOYMENT STEPS
+    # =========================================================================
     steps:
+      # -----------------------------------------------------------------------
+      # STEP 1: Checkout repository code
+      # -----------------------------------------------------------------------
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4  # Official GitHub action to clone repo
       
+      # -----------------------------------------------------------------------
+      # STEP 2: Authenticate with AWS using OIDC (no long-lived credentials!)
+      # -----------------------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          # Use OIDC to assume IAM role (more secure than access keys)
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
       
+      # -----------------------------------------------------------------------
+      # STEP 3: Install Terraform CLI
+      # -----------------------------------------------------------------------
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
-          terraform_version: ${{ env.TF_VERSION }}
+          terraform_version: ${{ env.TF_VERSION }}  # Pin version for consistency
       
+      # -----------------------------------------------------------------------
+      # STEP 4: Check Terraform code formatting
+      # -----------------------------------------------------------------------
       - name: Terraform Format Check
         id: fmt
-        run: terraform fmt -check -recursive
-        continue-on-error: true
+        run: terraform fmt -check -recursive  # Verify code follows style guide
+        continue-on-error: true               # Don't fail workflow on formatting issues
       
+      # -----------------------------------------------------------------------
+      # STEP 5: Initialize Terraform (download providers, configure backend)
+      # -----------------------------------------------------------------------
       - name: Terraform Init
         id: init
         run: terraform init
+        # This connects to S3 backend to store state
+        # Backend configured in infra/main.tf:
+        #   - State file: s3://circle-of-trust-terraform-state/prod/terraform.tfstate
+        #   - Lock table: DynamoDB table "terraform-state-lock"
       
+      # -----------------------------------------------------------------------
+      # STEP 6: Validate Terraform syntax and configuration
+      # -----------------------------------------------------------------------
       - name: Terraform Validate
         id: validate
-        run: terraform validate -no-color
+        run: terraform validate -no-color  # Check for syntax errors
       
+      # -----------------------------------------------------------------------
+      # STEP 7: Generate execution plan (what changes will be made)
+      # -----------------------------------------------------------------------
       - name: Terraform Plan
         id: plan
         run: |
+          # Create execution plan and save to file
           terraform plan -no-color -out=tfplan
+          # Convert binary plan to human-readable text
           terraform show -no-color tfplan > plan.txt
-        continue-on-error: true
+        continue-on-error: true  # Continue even if plan has warnings
       
+      # -----------------------------------------------------------------------
+      # STEP 8: Save plan as artifact (for review/debugging)
+      # -----------------------------------------------------------------------
       - name: Upload Plan
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-plan
-          path: infra/tfplan
-          retention-days: 5
+          name: terraform-plan          # Artifact name in GitHub Actions UI
+          path: infra/tfplan            # Binary plan file
+          retention-days: 5             # Keep for 5 days then auto-delete
       
+      # -----------------------------------------------------------------------
+      # STEP 9: Apply infrastructure changes (only on main branch)
+      # -----------------------------------------------------------------------
       - name: Terraform Apply
-        if: github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main'  # Safety: only apply on main branch
         run: terraform apply -auto-approve tfplan
+        # Creates/updates AWS resources:
+        # - ECS clusters (api, workers)
+        # - ECR repositories (api, worker)
+        # - S3 bucket (frontend)
+        # - DynamoDB tables (jobs, conversations)
+        # - SQS queue (job queue)
+        # - IAM roles and policies
+        # - Security groups, VPC, subnets
+        # - CloudWatch log groups
       
+      # -----------------------------------------------------------------------
+      # STEP 10: Capture Terraform outputs (resource IDs, URLs, etc.)
+      # -----------------------------------------------------------------------
       - name: Terraform Output
         if: github.ref == 'refs/heads/main'
         run: |
+          # Export all outputs to JSON file
           terraform output -json > terraform-outputs.json
+          # Display outputs in logs
           cat terraform-outputs.json
       
+      # -----------------------------------------------------------------------
+      # STEP 11: Save outputs as artifact (used by other workflows)
+      # -----------------------------------------------------------------------
       - name: Upload Outputs
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: terraform-outputs
-          path: infra/terraform-outputs.json
-          retention-days: 30
+          name: terraform-outputs           # Artifact name
+          path: infra/terraform-outputs.json # Contains ECR URLs, cluster names, etc.
+          retention-days: 30                # Keep for 30 days
       
+      # -----------------------------------------------------------------------
+      # STEP 12: Generate deployment summary in GitHub Actions UI
+      # -----------------------------------------------------------------------
       - name: Summary
         if: github.ref == 'refs/heads/main'
         run: |

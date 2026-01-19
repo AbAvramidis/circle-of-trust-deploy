@@ -1,6 +1,18 @@
+# ============================================================================
+# ECS Service Update Workflow
+# ============================================================================
+# Purpose: Force new deployment of ECS services to pull latest Docker images from ECR
+# Called by: deploy-backend-api.yml and deploy-backend-worker.yml workflows
+# Can also: Be manually triggered for rollback or redeployment scenarios
+# ============================================================================
+
 name: Update ECS Services
 
+# ============================================================================
+# WORKFLOW TRIGGERS
+# ============================================================================
 on:
+  # Manual trigger from GitHub Actions UI (allows choosing which service to update)
   workflow_dispatch:
     inputs:
       service:
@@ -9,9 +21,11 @@ on:
         default: 'all'
         type: choice
         options:
-          - all
-          - api
-          - worker
+          - all      # Update both API and Worker services
+          - api      # Update only API service
+          - worker   # Update only Worker service
+  
+  # Programmatic trigger from other workflows
   workflow_call:
     inputs:
       service:
@@ -19,76 +33,146 @@ on:
         required: true
         type: string
 
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
 env:
-  AWS_REGION: us-east-1
-  ECS_API_CLUSTER: circle-of-trust-api
-  ECS_API_SERVICE: api-service
-  ECS_WORKER_CLUSTER: circle-of-trust-workers
-  ECS_WORKER_SERVICE: worker-service
+  AWS_REGION: us-east-1                      # AWS region where ECS is deployed
+  ECS_API_CLUSTER: circle-of-trust-api       # API cluster name
+  ECS_API_SERVICE: api-service               # API service name
+  ECS_WORKER_CLUSTER: circle-of-trust-workers # Worker cluster name
+  ECS_WORKER_SERVICE: worker-service         # Worker service name
 
+# ============================================================================
+# JOBS - Separate jobs for API and Worker (can run in parallel if 'all' selected)
+# ============================================================================
 jobs:
+  # ===========================================================================
+  # JOB 1: Update API Service
+  # ===========================================================================
   update-api:
     name: Update API Service
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Run on GitHub-hosted Ubuntu runner
+    
+    # Only run if user selected 'api' or 'all'
     if: inputs.service == 'api' || inputs.service == 'all'
     
+    # =========================================================================
+    # PERMISSIONS: Required for OIDC authentication with AWS
+    # =========================================================================
     permissions:
-      id-token: write
-      contents: read
+      id-token: write   # Required to get OIDC token for AWS authentication
+      contents: read    # Required for checkout (if needed)
     
+    # =========================================================================
+    # DEPLOYMENT STEPS
+    # =========================================================================
     steps:
+      # -----------------------------------------------------------------------
+      # STEP 1: Authenticate with AWS using OIDC
+      # -----------------------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          # Use OIDC to assume IAM role (no long-lived access keys)
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
       
+      # -----------------------------------------------------------------------
+      # STEP 2: Trigger new deployment for API service
+      # -----------------------------------------------------------------------
       - name: Force new deployment
         run: |
           echo "🔄 Triggering new deployment for API service..."
+          # Force ECS to start new tasks with latest Docker image from ECR
           aws ecs update-service \
             --cluster ${{ env.ECS_API_CLUSTER }} \
             --service ${{ env.ECS_API_SERVICE }} \
-            --force-new-deployment \
-            --no-cli-pager
+            --force-new-deployment \              # Force new tasks even if no config changed
+            --no-cli-pager                         # Don't use pager in CI environment
+        # This tells ECS to:
+        # 1. Pull latest image with 'latest' tag from ECR
+        # 2. Start new tasks with the new image
+        # 3. Perform rolling update (stop old tasks gradually)
+        # 4. Use deployment circuit breaker for automatic rollback if unhealthy
       
+      # -----------------------------------------------------------------------
+      # STEP 3: Wait for deployment to complete and stabilize
+      # -----------------------------------------------------------------------
       - name: Wait for deployment
         run: |
           echo "⏳ Waiting for service stability..."
+          # Wait until all old tasks are stopped and new tasks are healthy
           aws ecs wait services-stable \
             --cluster ${{ env.ECS_API_CLUSTER }} \
             --services ${{ env.ECS_API_SERVICE }}
+          # This command blocks until:
+          # - All new tasks pass health checks
+          # - All old tasks are stopped
+          # - Service reaches desired count
+          # - No deployments are in progress
+          # Timeout: 10 minutes (will fail if service doesn't stabilize)
           echo "✅ API service updated successfully"
 
+  # ===========================================================================
+  # JOB 2: Update Worker Service
+  # ===========================================================================
   update-worker:
     name: Update Worker Service
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Run on GitHub-hosted Ubuntu runner
+    
+    # Only run if user selected 'worker' or 'all'
     if: inputs.service == 'worker' || inputs.service == 'all'
     
+    # =========================================================================
+    # PERMISSIONS: Required for OIDC authentication with AWS
+    # =========================================================================
     permissions:
-      id-token: write
-      contents: read
+      id-token: write   # Required to get OIDC token for AWS authentication
+      contents: read    # Required for checkout (if needed)
     
+    # =========================================================================
+    # DEPLOYMENT STEPS
+    # =========================================================================
     steps:
+      # -----------------------------------------------------------------------
+      # STEP 1: Authenticate with AWS using OIDC
+      # -----------------------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          # Use OIDC to assume IAM role (no long-lived access keys)
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
       
+      # -----------------------------------------------------------------------
+      # STEP 2: Trigger new deployment for Worker service
+      # -----------------------------------------------------------------------
       - name: Force new deployment
         run: |
           echo "🔄 Triggering new deployment for Worker service..."
+          # Force ECS to start new tasks with latest Docker image from ECR
           aws ecs update-service \
             --cluster ${{ env.ECS_WORKER_CLUSTER }} \
             --service ${{ env.ECS_WORKER_SERVICE }} \
-            --force-new-deployment \
-            --no-cli-pager
+            --force-new-deployment \              # Force new tasks even if no config changed
+            --no-cli-pager                         # Don't use pager in CI environment
+        # Worker runs on FARGATE_SPOT (70% cheaper)
+        # Can be interrupted, but that's OK for background job processing
+        # Jobs are queued in SQS, so workers can resume after interruption
       
+      # -----------------------------------------------------------------------
+      # STEP 3: Wait for deployment to complete and stabilize
+      # -----------------------------------------------------------------------
       - name: Wait for deployment
         run: |
           echo "⏳ Waiting for service stability..."
+          # Wait until all old tasks are stopped and new tasks are running
           aws ecs wait services-stable \
             --cluster ${{ env.ECS_WORKER_CLUSTER }} \
             --services ${{ env.ECS_WORKER_SERVICE }}
+          # Note: Workers don't have health checks, so this just waits for:
+          # - New tasks to start
+          # - Old tasks to stop
+          # - Service to reach desired count
           echo "✅ Worker service updated successfully"

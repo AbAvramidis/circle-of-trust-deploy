@@ -1,73 +1,138 @@
+# ============================================================================
+# Backend Worker Deployment Workflow
+# ============================================================================
+# Purpose: Build Worker Docker image and push to ECR (triggers ECS update separately)
+# Deploys: Python worker application container to Amazon ECR
+# Runtime: ECS Fargate SPOT (70% cheaper) - deployed via update-ecs.yml workflow
+# ============================================================================
+
 name: Deploy Backend Worker to ECS
 
+# ============================================================================
+# WORKFLOW TRIGGERS
+# ============================================================================
 on:
+  # Trigger when backend or Worker dockerfile changes
   push:
     branches: [main]
     paths:
-      - 'backend/**'
-      - '!backend/tests/**'
-      - 'Dockerfile.worker'
-      - '.github/workflows/deploy-backend-worker.yml'
+      - 'backend/**'                                  # Backend Python code changes
+      - '!backend/tests/**'                           # Exclude test changes
+      - 'Dockerfile.worker'                           # Worker Dockerfile changes
+      - '.github/workflows/deploy-backend-worker.yml' # Workflow file changes
+  
+  # Allow manual trigger from GitHub Actions UI
   workflow_dispatch:
 
+# ============================================================================
+# ENVIRONMENT VARIABLES
+# ============================================================================
 env:
-  AWS_REGION: us-east-1
-  ECR_REPOSITORY: circle-of-trust-worker
-  ECS_CLUSTER: circle-of-trust-workers
-  ECS_SERVICE: worker-service
-  CONTAINER_NAME: worker
+  AWS_REGION: us-east-1                     # AWS region for ECR and ECS
+  ECR_REPOSITORY: circle-of-trust-worker    # ECR repository name
+  ECS_CLUSTER: circle-of-trust-workers      # ECS cluster name
+  ECS_SERVICE: worker-service               # ECS service name
+  CONTAINER_NAME: worker                    # Container name in task definition
 
+# ============================================================================
+# JOBS
+# ============================================================================
 jobs:
   deploy:
     name: Build and Deploy Worker
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest  # Run on GitHub-hosted Ubuntu runner
     
+    # =========================================================================
+    # PERMISSIONS: Required for OIDC authentication with AWS
+    # =========================================================================
     permissions:
-      id-token: write
-      contents: read
+      id-token: write   # Required to get OIDC token for AWS authentication
+      contents: read    # Required to checkout repository code
     
+    # =========================================================================
+    # DEPLOYMENT STEPS
+    # =========================================================================
     steps:
+      # -----------------------------------------------------------------------
+      # STEP 1: Checkout repository code
+      # -----------------------------------------------------------------------
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4  # Clone repository to runner
       
+      # -----------------------------------------------------------------------
+      # STEP 2: Authenticate with AWS using OIDC
+      # -----------------------------------------------------------------------
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
+          # Use OIDC to assume IAM role (no long-lived access keys needed)
           role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
           aws-region: ${{ env.AWS_REGION }}
       
+      # -----------------------------------------------------------------------
+      # STEP 3: Login to Amazon ECR (Elastic Container Registry)
+      # -----------------------------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
+        # This action retrieves ECR login credentials and configures Docker CLI
+        # Output: Registry URL (e.g., 123456789012.dkr.ecr.us-east-1.amazonaws.com)
       
+      # -----------------------------------------------------------------------
+      # STEP 4: Generate image tags
+      # -----------------------------------------------------------------------
       - name: Set image tag
         id: image
         run: |
+          # Use git commit SHA as unique image tag (enables rollback to specific commits)
           echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          # Construct full image repository URL
           echo "repo=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}" >> $GITHUB_OUTPUT
       
+      # -----------------------------------------------------------------------
+      # STEP 5: Build Docker image for Worker
+      # -----------------------------------------------------------------------
       - name: Build Docker image
         run: |
+          # Build image from Dockerfile.worker with two tags:
+          # 1. SHA tag (e.g., abc123def) - specific version
+          # 2. latest tag - always points to most recent build
           docker build \
             -f Dockerfile.worker \
             -t ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }} \
             -t ${{ steps.image.outputs.repo }}:latest \
             .
+        # Dockerfile.worker contains:
+        # - Python base image
+        # - Install dependencies from pyproject.toml
+        # - Copy backend code
+        # - Run worker script that polls SQS
       
+      # -----------------------------------------------------------------------
+      # STEP 6: Run security vulnerability scan
+      # -----------------------------------------------------------------------
       - name: Run security scan (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }}
-          format: 'sarif'
-          output: 'trivy-results.sarif'
-          severity: 'CRITICAL,HIGH'
-        continue-on-error: true
+          format: 'sarif'                   # SARIF format for GitHub Security tab
+          output: 'trivy-results.sarif'     # Output file
+          severity: 'CRITICAL,HIGH'         # Only report critical/high vulnerabilities
+        continue-on-error: true             # Don't fail deployment on vulnerabilities (report only)
       
+      # -----------------------------------------------------------------------
+      # STEP 7: Push Docker image to ECR
+      # -----------------------------------------------------------------------
       - name: Push image to ECR
         run: |
-          docker push ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }}
-          docker push ${{ steps.image.outputs.repo }}:latest
+          # Push both tags to ECR
+          docker push ${{ steps.image.outputs.repo }}:${{ steps.image.outputs.tag }}  # SHA tag
+          docker push ${{ steps.image.outputs.repo }}:latest                          # Latest tag
+        # Images are now available in ECR for ECS to pull
       
+      # -----------------------------------------------------------------------
+      # STEP 8: Display deployment summary
+      # -----------------------------------------------------------------------
       - name: Deployment summary
         run: |
           echo "✅ Worker image pushed to ECR" >> $GITHUB_STEP_SUMMARY
@@ -76,21 +141,29 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "To deploy this image, run the 'Update ECS Services' workflow" >> $GITHUB_STEP_SUMMARY
       
+      # -----------------------------------------------------------------------
+      # STEP 9: Trigger ECS service update workflow
+      # -----------------------------------------------------------------------
       - name: Trigger ECS update
         uses: actions/github-script@v7
         with:
           script: |
+            # Programmatically trigger the update-ecs.yml workflow
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              workflow_id: 'update-ecs.yml',
-              ref: 'main',
+              workflow_id: 'update-ecs.yml',    # Target workflow file
+              ref: 'main',                       # Branch to run on
               inputs: {
-                service: 'worker'
+                service: 'worker'                # Tell it to update Worker service only
               }
             })
             console.log('✅ Triggered ECS Worker service update')
+        # This automatically deploys the new image to ECS without manual intervention
       
+      # -----------------------------------------------------------------------
+      # STEP 10: Final verification message
+      # -----------------------------------------------------------------------
       - name: Verify deployment
         run: |
           echo "✅ Worker image built and pushed"
